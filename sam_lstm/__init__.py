@@ -1,3 +1,4 @@
+import pathlib
 import cv2
 import os
 
@@ -9,16 +10,17 @@ from keras.layers import Input
 from keras.models import Model
 from keras.utils import get_file
 
-from sam_lstm.utilities import postprocess_predictions
-from sam_lstm.models import (
+from .utilities import postprocess_predictions
+from .models import (
     kl_divergence,
     correlation_coefficient,
     nss,
     sam_resnet,
 )
-from sam_lstm.generator import generator, generator_test
-from sam_lstm.cropping import batch_crop_images
-from sam_lstm.config import (
+from .generator import generator, generator_test, generator_image
+from .cropping import batch_crop_images, script_crop
+from PIL import Image
+from .config import (
     shape_r,
     shape_c,
     shape_r_gt,
@@ -97,117 +99,6 @@ class SalMap:
 
         return images, maps, fixs
 
-    def train(
-        self,
-        dataset_path=dataset_path,
-        checkpoint_path="weights/",
-        steps_per_epoch=steps_per_epoch,
-    ):
-        imgs_path = os.path.join(dataset_path, "images")
-        maps_path = os.path.join(dataset_path, "maps")
-        fixs_path = os.path.join(dataset_path, "fixations")
-
-        if not os.path.exists(imgs_path):
-            print(f"Didn't find {imgs_path}")
-            imgs_zip_path = get_file(
-                origin=DATASET_IMAGES_URL,
-                file_hash="2c72253ccb5288118864ebd2ab15a55e",
-                hash_algorithm="md5",
-                extract=True,
-                cache_dir=os.getcwd(),
-                cache_subdir=dataset_path,
-            )
-            imgs_path = imgs_zip_path.replace(".zip", "")
-
-        if not os.path.exists(maps_path):
-            print(f"Didn't find {maps_path}")
-            maps_zip_path = get_file(
-                origin=DATASET_MAPS_URL,
-                file_hash="5218595acfeec3b9fc0a4964d0566360",
-                hash_algorithm="md5",
-                extract=True,
-                cache_dir=os.getcwd(),
-                cache_subdir=dataset_path,
-            )
-            maps_path = maps_zip_path.replace(".zip", "")
-
-        if not os.path.exists(fixs_path):
-            print(f"Didn't find {fixs_path}")
-            fixs_zip_path = get_file(
-                origin=DATASET_FIXS_URL,
-                file_hash="0d6f4a54c3d36ccc85a74b1b4b40bed5",
-                hash_algorithm="md5",
-                extract=True,
-                cache_dir=os.getcwd(),
-                cache_subdir=dataset_path,
-            )
-            fixs_path = fixs_zip_path.replace(".zip", "")
-
-        imgs_train_path = os.path.join(imgs_path, "train")
-        maps_train_path = os.path.join(maps_path, "train")
-        fixs_train_path = os.path.join(fixs_path, "train")
-
-        imgs_val_path = os.path.join(imgs_path, "val")
-        maps_val_path = os.path.join(maps_path, "val")
-        fixs_val_path = os.path.join(fixs_path, "val")
-
-        for path in [
-            imgs_train_path,
-            maps_train_path,
-            fixs_train_path,
-            imgs_val_path,
-            maps_val_path,
-            fixs_val_path,
-        ]:
-            if not os.path.exists(path):
-                raise Exception(f"Didn't find the {path}! Can't start training...")
-
-        imgs_train, maps_train, fixs_train = self.get_valid_images(
-            imgs_train_path, maps_train_path, fixs_train_path
-        )
-
-        print("Training SAM-ResNet")
-        train_gen = generator(
-            imgs_train,
-            maps_train,
-            fixs_train,
-        )
-
-        imgs_val, maps_val, fixs_val = self.get_valid_images(
-            imgs_val_path, maps_val_path, fixs_val_path
-        )
-        validation_gen = generator(
-            imgs_val,
-            maps_val,
-            fixs_val,
-        )
-        if not os.path.exists(checkpoint_path):
-            raise Exception(
-                f"Directory: {checkpoint_path} not found, first make sure it exists. Then, try again!"
-            )
-
-        self.model.fit(
-            train_gen,
-            batch_size=b_s,
-            epochs=nb_epoch,
-            # all training will be visited twice
-            steps_per_epoch=steps_per_epoch,
-            validation_data=validation_gen,
-            validation_steps=int(steps_per_epoch / 3),
-            callbacks=[
-                EarlyStopping(patience=3),
-                ModelCheckpoint(
-                    os.path.join(checkpoint_path, "sam-resnet-salicon.h5"),
-                    monitor="val_loss",
-                    verbose=0,
-                    save_best_only=True,
-                    save_weights_only=True,
-                    mode="auto",
-                    save_freq="epoch",
-                ),
-            ],
-        )
-
     def load_weights(self, weights_dir=None):
         if weights_dir:
             if not os.path.exists(weights_dir):
@@ -273,17 +164,80 @@ class SalMap:
             cmap_path = os.path.join(cmaps_folder, fname)
             cv2.imwrite(cmap_path, overlaid)
 
+    def shinon_predicts(
+        self, images: list[pathlib.Path], gaussian_blur=1, visualize=False, crop_args={}
+    ):
+        for image in images:
+            with Image.open(image) as pil_image:
+                if pil_image.size[0] > 768 or pil_image.size[1] > 768:
+                    # Resize image to 768 by 768 at best or else the processing is gonna take forever.
+                    sized = pil_image.copy()
+                    sized.thumbnail((768, 768))
+                    if sized.size[0] == 768:
+                        ratio = pil_image.size[0] / sized.size[0]
+                    elif sized.size[1] == 768:
+                        ratio = pil_image.size[1] / sized.size[1]
+                    else:
+                        raise Exception("Uncaught Error on ratios")
+                else:
+                    sized = pil_image
+                    ratio = 1.0
+
+                predictions = self.model.predict(generator_image(sized), steps=1)[0][0][
+                    0
+                ]
+                mapped_image = postprocess_predictions(
+                    predictions, sized.size[1], sized.size[0], sigma=gaussian_blur
+                )
+                salient_image = Image.fromarray(mapped_image)
+                # sized.show()
+                # salient_image.show()
+                # if visualize:
+                #    salient_image.show()
+
+                if (
+                    "dsc_asp" in crop_args
+                    and isinstance(crop_args["dsc_asp"], str)
+                    and crop_args["dsc_asp"].lower() == "auto"
+                ):
+                    crop_args["dsc_asp"] = pil_image.size[0] / pil_image.size[1]
+
+                if crop_args:
+                    _, coords_scaled, visualize = script_crop(
+                        salient_image,
+                        ratio,
+                        visualize=None if not visualize else sized,
+                        **crop_args,
+                    )
+                else:
+                    _, coords_scaled, visualize = script_crop(
+                        salient_image, ratio, visualize=None if not visualize else sized
+                    )
+
+                for idx, coord in enumerate(coords_scaled):
+                    image_path = pathlib.Path(
+                        f"output/{image.with_stem(image.stem + '_' + str(idx)).name}"
+                    ).resolve()
+                    if not image_path.parent.is_dir():
+                        image_path.parent.mkdir(parents=True)
+                    if image.suffix in [".jpg", ".jpeg"]:
+                        pil_image.crop(coord).save(image_path, quality=95)
+                    else:
+                        pil_image.crop(coord).save(image_path)
+                if visualize:
+                    image_path = pathlib.Path(
+                        f"output/{image.with_stem(image.stem + '_vis').with_suffix('.png').name}"
+                    ).resolve()
+                    visualize.save(image_path)
+
     @staticmethod
     def box_and_crop(
-        asp_ratio=aspect_ratio,
-        threshold_attention=retained_attention,
         originals_folder="samples",
-        alpha=20,
-        beta=15,
-        gamma=5,
+        max_gap=0.2,
+        peak_thr=0.5,
     ):
         """
-        score = alpha ** (% of total attention) + beta ** (% of total area) + gamma ** (attention density)
+        get_centroids's maximum_gap & peak_threshold
         """
         maps_folder = os.path.join(os.path.dirname(originals_folder), "maps")
         if not os.path.exists(maps_folder):
@@ -300,9 +254,6 @@ class SalMap:
             maps_folder,
             crops_folder,
             boxes_folder,
-            asp_ratio,
-            threshold_attention,
-            alpha=alpha,
-            beta=beta,
-            gamma=gamma,
+            max_gap=max_gap,
+            peak_thr=peak_thr,
         )

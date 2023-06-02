@@ -94,6 +94,20 @@ def padding_fixation(img, shape_r=480, shape_c=640):
         return img_padded
 
 
+def preprocess_cv2img(pil_images, shape_r, shape_c):
+    ims = np.zeros((1, shape_r, shape_c, 3))
+    original_image = np.array(pil_images, dtype=np.float64)[:, :, ::-1]
+    padded_image = padding(original_image, shape_r, shape_c, 3)
+    ims[0] = padded_image
+
+    ims[:, :, :, 0] -= 103.939
+    ims[:, :, :, 1] -= 116.779
+    ims[:, :, :, 2] -= 123.68
+    ims = ims.transpose((0, 3, 1, 2))
+
+    return ims
+
+
 def preprocess_images(paths, shape_r, shape_c):
     ims = np.zeros((len(paths), shape_r, shape_c, 3))
 
@@ -142,6 +156,7 @@ def preprocess_fixmaps(paths, shape_r, shape_c):
 
 def postprocess_predictions(pred, shape_r, shape_c, sigma=gaussina_sigma):
     predictions_shape = pred.shape
+    print(pred.shape)
     rows_rate = shape_r / predictions_shape[0]
     cols_rate = shape_c / predictions_shape[1]
 

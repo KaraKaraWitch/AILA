@@ -1,4 +1,6 @@
 import os
+import typing
+from PIL import Image
 import numpy as np
 import cv2
 import math
@@ -122,17 +124,25 @@ def find_best_rectangle(
         )
 
 
-def get_centroids(array2d, maximum_gap=0.2, peak_theshold=0.5):
+def get_centroids(array2d, maximum_gap=0.2, peak_theshold=0.5, reverse_k=False, max_k=4):
+    array2d = array2d.copy()
+    #print(array2d.shape)
+
+    centroid_k = [i+1 for i in range(max_k)]
+    if reverse_k:
+        centroid_k.reverse()
     maximum_distortion = array2d.shape[0] * maximum_gap
-    for _k in [1, 2, 3, 4]:
+    for _k in centroid_k:
         peaks = peak_local_max(array2d, threshold_rel=peak_theshold).astype(np.float32)
         k_peaks, distortion = kmeans(peaks.astype(float), _k)
         if distortion < maximum_distortion:
             return k_peaks.astype(np.uint32)
+    return []
 
 
 def descend_from_hilltop(array2d, cent_ij, alpha=1.5, beta=0.5, asp_ratio=1.44):
     cent_i, cent_j = cent_ij
+    print("hilltop:",array2d.shape, cent_ij)
     image_h, image_w = array2d.shape
     _1_pct_height = int(image_h * 0.05)
     total_area = image_h * image_w
@@ -188,9 +198,9 @@ def crop(
     saliency_map_path,
     cropped_image_path,
     boxed_image_path,
-    a_r,
-    attention,
-    **kwargs,
+    max_gap=0.2,
+    peak_thr=0.5,
+
 ):
     BLUE = (255, 0, 0)
     THICKNESS = 5
@@ -199,12 +209,7 @@ def crop(
     boxed = np.copy(original_ndimage)
     salient_ndimage = cv2.imread(saliency_map_path, cv2.IMREAD_GRAYSCALE)
 
-    # x, y, w, h = find_best_rectangle(salient_ndimage, a_r, attention, **kwargs)
-    # cropped_ndimage = original_ndimage[y : y + h, x : x + w, :]
-    # crop_success = cv2.imwrite(cropped_image_path, cropped_ndimage.astype(int))
-    # Draw a diagonal blue line with thickness of 5 px
-    # cv2.rectangle(original_ndimage, (x, y), (x + w, y + h), blue, thickness)
-    for i, cent_ij in enumerate(get_centroids(salient_ndimage)):
+    for i, cent_ij in enumerate(get_centroids(salient_ndimage, maximum_gap=max_gap, peak_theshold=peak_thr)):
         if i > 0:
             name, ext = cropped_image_path.rsplit(".", 1)
             cropped_image_path = f"{name}_{i}.{ext}"
@@ -217,15 +222,68 @@ def crop(
         cv2.rectangle(boxed, (start_x, start_y), (finish_x, finish_y), BLUE, THICKNESS)
     cv2.imwrite(boxed_image_path, boxed)
 
+def script_crop(salient_map:Image.Image,
+                point_scale: float,
+                visualize:typing.Optional[Image.Image]=None,
+                max_gap=0.2, peak_thr=0.5,
+                dsc_alpha=1.5, dsc_beta=0.5, dsc_asp=1.44,
+                reverse_k=False, max_k=4
+                ):
+    """Gets the coordinates for the cropping region
+
+    Args:
+        salient_map (Image.Image): The salient image map. (Required)
+        point_scale (float): The point scaling to map the salient image to the original image
+        max_gap (float, optional): Determines how wide in terms of spread the saliency will need before it is picked up as the center. Defaults to 0.2.
+        peak_thr (float, optional): Determines how high the peak for a "hotspot"/"centroid" needs to be before it gets picked up. Defaults to 0.5.
+        dsc_alpha (float, optional): Hilltop Descend's alpha param. Defaults to 1.5.
+        dsc_beta (float, optional): Hilltop Descend's Beta param. Defaults to 0.5.
+        dsc_asp (float, optional): Hilltop Descend's Aspect Ratio. Defaults to 1.44.
+        visualize (Image.Image, optional): pass in the scaled image to visualize how the points are drawn.
+    Returns:
+        A tuple containing a list of coordinates and another list with their values scaled.
+    """
+    
+    salient_ndimage = np.array(salient_map, dtype=np.float64)[:].copy()
+    coords = []
+    coords_scaled = []
+    if visualize:
+        from PIL import ImageDraw, ImageOps
+        salient_map = salient_map.convert("L")
+        salient_map = ImageOps.colorize(salient_map, black ="blue", white ="red")
+        salient_map = salient_map.convert("RGBA")
+        salient_map.putalpha(127)
+        visualize = visualize.convert("RGBA")
+        visualize.alpha_composite(salient_map)
+        salient_draw = ImageDraw.Draw(visualize)
+    else:
+        salient_draw = None
+    
+    for i, cent_ij in enumerate(get_centroids(salient_ndimage, maximum_gap=max_gap, peak_theshold=peak_thr, reverse_k=reverse_k, max_k=max_k)):
+        x0, y0, x1, y1 = descend_from_hilltop(
+            salient_ndimage, cent_ij, dsc_alpha, dsc_beta, dsc_asp
+        )
+        coords.append([x0, y0, x1, y1])
+        coords_scaled.append([x0*point_scale, y0*point_scale, x1*point_scale, y1*point_scale])
+        if visualize and salient_draw:
+            dot_size = 5
+            salient_draw.ellipse((cent_ij[1]-dot_size, cent_ij[0]-dot_size, cent_ij[1]+dot_size, cent_ij[0]+dot_size), fill=(255,0,0))
+            print("Centroid",cent_ij, "crop_box", (x0, y0, x1, y1))
+            salient_draw.rectangle((x0, y0, x1, y1), outline=(0,0,255))
+
+    #if visualize:
+    #    visualize.show()
+    return coords, coords_scaled, visualize
+
+    
 
 def batch_crop_images(
     originals_folder,
     maps_folder,
     crops_folder,
     boxes_folder,
-    aspect_ratio,
-    retained_attention,
-    **kwargs,
+    max_gap,
+    peak_thr,
 ):
     for _dir in [crops_folder, boxes_folder]:
         if not os.path.exists(_dir):
@@ -243,9 +301,8 @@ def batch_crop_images(
                     mapping_file,
                     crop_file,
                     box_file,
-                    aspect_ratio,
-                    retained_attention,
-                    **kwargs,
+                    max_gap,
+                    peak_thr,
                 )
             except Exception as e:
                 print(f"{e} for {fname}")

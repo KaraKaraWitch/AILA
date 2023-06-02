@@ -1,6 +1,8 @@
 import os
+import pathlib
+import typing
 import numpy as np
-from sam_lstm.config import (
+from .config import (
     nb_gaussian,
     shape_r_gt,
     shape_c_gt,
@@ -10,10 +12,11 @@ from sam_lstm.config import (
     shape_c_out,
     b_s,
 )
-from sam_lstm.utilities import (
+from .utilities import (
     preprocess_images,
     preprocess_maps,
     preprocess_fixmaps,
+    preprocess_cv2img,
 )
 
 
@@ -54,6 +57,10 @@ def generator(
         else:
             counter = (counter + batch_size) % n_images
 
+def generator_image(image):
+    gaussian = np.zeros((b_s, nb_gaussian, shape_r_gt, shape_c_gt))
+    return [preprocess_cv2img(image, shape_r, shape_c), gaussian]
+
 
 def generator_test(fnames, images_path):
     batch_size = b_s
@@ -67,7 +74,7 @@ def generator_test(fnames, images_path):
     img_yielded = 0
     while True:
         yield [
-            [
+                [
                 preprocess_images(
                     images[counter : counter + batch_size], shape_r, shape_c
                 ),
